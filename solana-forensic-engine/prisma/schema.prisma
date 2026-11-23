@@ -1,0 +1,142 @@
+// Solana Forensic Engine — Prisma schema (PostgreSQL)
+// The MVP runs on an in-memory repository (lib/db/repository.ts);
+// enable this schema when connecting Neon/Supabase in Beta.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Token {
+  mint         String         @id
+  symbol       String?
+  name         String?
+  decimals     Int            @default(9)
+  supply       Decimal        @default(0) @db.Decimal(78, 0)
+  createdAt    DateTime?      @map("created_at")
+  slot         BigInt?
+  deployer     String?
+  launchpad    String?
+  metadataUri  String?        @map("metadata_uri")
+  riskScore    Int            @default(0) @map("risk_score")
+  phase        String         @default("unknown")
+  investigations Investigation[]
+
+  @@map("tokens")
+}
+
+model Wallet {
+  address    String   @id
+  firstSeen  DateTime? @map("first_seen")
+  labels     String[] @default([])
+  riskScore  Int      @default(0) @map("risk_score")
+  clusterId  String?  @map("cluster_id") @db.Uuid
+  cluster    WalletCluster? @relation(fields: [clusterId], references: [clusterId])
+  isBot      Boolean  @default(false) @map("is_bot")
+  isCex      Boolean  @default(false) @map("is_cex")
+  isBridge   Boolean  @default(false) @map("is_bridge")
+
+  @@map("wallets")
+}
+
+model WalletCluster {
+  clusterId String   @id @default(uuid()) @map("cluster_id") @db.Uuid
+  heuristic String
+  confidence Int
+  members   String[]
+  tokenMint String?  @map("token_mint")
+  evidence  Json     @default("[]")
+  wallets   Wallet[]
+
+  @@map("wallet_clusters")
+}
+
+model Transaction {
+  signature         String   @id
+  slot              BigInt?
+  blockTime         DateTime? @map("block_time")
+  fee               BigInt?
+  status            String?
+  instructionsCount Int?     @map("instructions_count")
+  computeUnits      BigInt?  @map("compute_units")
+  events            TokenEvent[]
+
+  @@map("transactions")
+}
+
+model TokenEvent {
+  txSignature String      @map("tx_signature")
+  eventType   String      @map("event_type")
+  fromWallet  String?     @map("from_wallet")
+  toWallet    String?     @map("to_wallet")
+  amount      Decimal?    @db.Decimal(78, 0)
+  mint        String?
+  pool        String?
+  programId   String?     @map("program_id")
+  slot        BigInt?
+  blockTime   DateTime    @map("block_time")
+  meta        Json        @default("{}")
+  transaction Transaction @relation(fields: [txSignature], references: [signature])
+
+  @@id([txSignature, eventType, slot])
+  @@index([mint, blockTime])
+  @@index([fromWallet, blockTime])
+  @@index([toWallet, blockTime])
+  @@index([pool, blockTime])
+  @@map("token_events")
+}
+
+model LiquidityEvent {
+  id          BigInt    @id @default(autoincrement())
+  pool        String
+  eventType   String    @map("event_type")
+  amountToken Decimal?  @map("amount_token") @db.Decimal(78, 0)
+  amountSol   Decimal?  @map("amount_sol") @db.Decimal(78, 0)
+  provider    String?
+  blockTime   DateTime? @map("block_time")
+
+  @@map("liquidity_events")
+}
+
+model Investigation {
+  id        String   @id @default(uuid()) @db.Uuid
+  tokenMint String?  @map("token_mint")
+  token     Token?   @relation(fields: [tokenMint], references: [mint])
+  createdBy String?  @map("created_by")
+  status    String   @default("open")
+  createdAt DateTime @default(now()) @map("created_at")
+  findings  Finding[]
+
+  @@map("investigations")
+}
+
+model Finding {
+  id               String        @id @default(uuid()) @db.Uuid
+  investigationId  String        @map("investigation_id") @db.Uuid
+  investigation    Investigation @relation(fields: [investigationId], references: [id])
+  level            String
+  title            String
+  description      String?
+  evidence         Json
+  confidenceScore  Int           @map("confidence_score")
+  reasoningSummary String?       @map("reasoning_summary")
+  dataSources      String[]      @default([]) @map("data_sources")
+  createdAt        DateTime      @default(now()) @map("created_at")
+
+  @@index([investigationId, createdAt])
+  @@map("findings")
+}
+
+model Label {
+  address   String
+  labelType String   @map("label_type")
+  source    String?
+  verified  Boolean  @default(false)
+
+  @@id([address, labelType])
+  @@map("labels")
+}
