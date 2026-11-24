@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #0b0f14;
+  --panel: #111826;
+  --border: #1f2a3a;
+}
+
+html,
+body {
+  background-color: var(--bg);
+  color: #e5e7eb;
+}
+
+.panel {
+  background-color: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+[dir="rtl"] .ltr-only {
+  direction: ltr;
+}
