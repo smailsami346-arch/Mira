@@ -17,6 +17,9 @@ function dispatch(programId: string, data: Uint8Array, accounts: string[], sourc
       return decodeRaydium(data, accounts, source);
     case PROGRAM_IDS.PUMP_FUN:
       return decodePump(data, accounts, source);
+    case PROGRAM_IDS.JUPITER_V6:
+      // Router instruction; token flows come from inner SPL transfers.
+      return { kind: "JupiterRoute", source, accounts };
     default:
       return { kind: "UnknownProgram", source, accounts };
   }
@@ -34,8 +37,9 @@ export function decodeTransaction(tx: any): DecodedInstruction[] {
   const keys = accountKeysOf(message);
   const out: DecodedInstruction[] = [];
 
-  const decodeOne = (ix: any, source: "outer" | "inner", parentProgramId?: string) => {
-    const programId = keys[ix.programIdIndex];
+  const decodeOne = (ix: any, source: "outer" | "inner", parent?: { program_id: string; kind: string }) => {
+    // "json" encoding uses programIdIndex; "jsonParsed" provides programId directly.
+    const programId = typeof ix.programId === "string" ? ix.programId : keys[ix.programIdIndex];
     if (!programId || typeof ix.data !== "string") return;
     let data: Uint8Array;
     try {
@@ -47,16 +51,19 @@ export function decodeTransaction(tx: any): DecodedInstruction[] {
       .map((i: number) => keys[i])
       .filter((a: string | undefined) => Boolean(a));
     const d = dispatch(programId, data, accounts, source);
-    if (d) out.push({ program_id: programId, parent_program_id: parentProgramId, ...d });
+    if (d) out.push({ program_id: programId, parent_program_id: parent?.program_id, parent_kind: parent?.kind, ...d });
   };
 
-  const outerPrograms = new Map<number, string>();
-  (message.instructions ?? []).forEach((ix: any, i: number) => {
-    outerPrograms.set(i, keys[ix.programIdIndex]);
-  });
-  for (const ix of message.instructions ?? []) decodeOne(ix, "outer");
+  const outerDecoded: { program_id: string; kind: string }[] = [];
+  for (const ix of message.instructions ?? []) {
+    const programId = typeof ix.programId === "string" ? ix.programId : keys[ix.programIdIndex];
+    const before = out.length;
+    decodeOne(ix, "outer");
+    if (out.length > before && programId) outerDecoded.push({ program_id: programId, kind: out[out.length - 1].kind });
+    else if (programId) outerDecoded.push({ program_id: programId, kind: "UnknownProgram" });
+  }
   for (const group of tx?.meta?.innerInstructions ?? []) {
-    const parent = outerPrograms.get(group.index);
+    const parent = outerDecoded[group.index];
     for (const ix of group.instructions ?? []) decodeOne(ix, "inner", parent);
   }
   return out;

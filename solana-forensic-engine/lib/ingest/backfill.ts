@@ -6,11 +6,45 @@ import { PROGRAM_IDS } from "../decoder/programs";
 import { runEngine, summarizeToken } from "../heuristics/engine";
 import type { NormalizedEvent, TokenRecord, TransactionRecord } from "../types";
 
-// Backfills all transactions touching `mint`, normalizes them, stores events,
-// then runs the full heuristic engine and stores findings + clusters.
-export async function backfillToken(repo: Repository, rpc: RpcClient, mint: string, limit = 1000) {
-  const sigs = await rpc.getSignaturesForAddress(mint, limit);
-  const txs = await rpc.getTransactions(sigs.map((s) => s.signature));
+export interface BackfillOptions {
+  /** recent signatures to fetch (newest first) */
+  limit?: number;
+  /** how many signature pages of `limit` to walk back (to reach the launch window) */
+  maxPages?: number;
+  /** oldest signatures to fetch (launch window: creation + early snipers) */
+  launchWindow?: number;
+}
+
+// Backfills a token: pages signatures back to the launch window, fetches
+// transactions (newest `limit` + oldest `launchWindow`), decodes, normalizes,
+// stores, then runs the full heuristic engine.
+export async function backfillToken(
+  repo: Repository,
+  rpc: RpcClient,
+  mint: string,
+  opts: number | BackfillOptions = 1000,
+) {
+  const o: BackfillOptions = typeof opts === "number" ? { limit: opts } : opts;
+  const limit = o.limit ?? 1000;
+  const maxPages = o.maxPages ?? 5;
+  const launchWindow = o.launchWindow ?? 200;
+
+  // page signatures backwards (getSignaturesForAddress returns newest first)
+  const sigs: Array<{ signature: string; slot: number }> = [];
+  let before: string | undefined;
+  let pages = 0;
+  while (pages < maxPages) {
+    const batch = await rpc.getSignaturesForAddress(mint, limit, before);
+    if (!batch.length) break;
+    sigs.push(...batch.map((s) => ({ signature: s.signature, slot: s.slot })));
+    before = batch[batch.length - 1].signature;
+    pages++;
+    if (batch.length < limit) break; // reached the beginning
+  }
+  // fetch newest `limit` + oldest `launchWindow` (launch/creation window)
+  const selected = [...sigs.slice(0, limit), ...sigs.slice(-launchWindow)];
+  const uniqSigs = [...new Map(selected.map((s) => [s.signature, s.signature])).values()];
+  const txs = await rpc.getTransactions(uniqSigs);
 
   const events: NormalizedEvent[] = [];
   const transactions: TransactionRecord[] = [];
@@ -30,10 +64,10 @@ export async function backfillToken(repo: Repository, rpc: RpcClient, mint: stri
         deployer = deployer ?? signer;
         if (d.decimals !== undefined) decimals = d.decimals;
       }
-      if (d.program_id === PROGRAM_IDS.PUMP_FUN) launchpad = "pump.fun";
-      else if (d.program_id === PROGRAM_IDS.RAYDIUM_AMM_V4 && d.kind === "CreatePool" && d.mint === mint) {
-        launchpad = launchpad ?? "raydium";
-      }
+      if (d.program_id === PROGRAM_IDS.PUMP_FUN) launchpad = launchpad ?? "pump.fun";
+      else if (d.program_id === "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA") launchpad = launchpad ?? "pump.fun AMM";
+      else if (d.program_id === PROGRAM_IDS.RAYDIUM_AMM_V4 && d.kind === "CreatePool" && d.mint === mint) launchpad = launchpad ?? "raydium";
+      else if (d.program_id === PROGRAM_IDS.JUPITER_V6) launchpad = launchpad ?? "jupiter";
     }
     for (const e of ev) {
       if (e.event_type === "Mint" && e.mint === mint) supply += BigInt(e.amount || "0");
@@ -63,7 +97,7 @@ export async function backfillToken(repo: Repository, rpc: RpcClient, mint: stri
     decimals,
     supply: supply.toString(),
     created_at: new Date().toISOString(),
-    slot: transactions.length ? Math.min(...transactions.map((t) => t.slot)) : 0,
+    slot: sigs.length ? Math.min(...sigs.map((s) => s.slot)) : 0,
     deployer: deployer ?? null,
     launchpad: launchpad ?? "unknown",
     metadata_uri: null,
@@ -74,6 +108,7 @@ export async function backfillToken(repo: Repository, rpc: RpcClient, mint: stri
     supply: supply > 0n ? supply.toString() : token.supply,
     deployer: deployer ?? token.deployer,
     launchpad: launchpad ?? token.launchpad,
+    slot: sigs.length ? Math.min(...sigs.map((s) => s.slot)) : token.slot,
   });
 
   repo.addTransactions(transactions);
@@ -82,10 +117,8 @@ export async function backfillToken(repo: Repository, rpc: RpcClient, mint: stri
   const investigation = repo.createInvestigation(mint, "backfill");
   const allEvents = repo.listEventsByMint(mint, { limit: 100_000 });
   const wallets = new Map(repo.listWallets().map((w) => [w.address, w]));
-  const { findings, clusters } = runEngine(
-    { token: repo.getToken(mint) as TokenRecord, events: allEvents, transactions, wallets },
-    investigation.id,
-  );
+  const current = repo.getToken(mint) as TokenRecord;
+  const { findings, clusters } = runEngine({ token: current, events: allEvents, transactions, wallets }, investigation.id);
   repo.addFindings(findings);
   repo.addClusters(clusters);
   for (const w of wallets.values()) repo.upsertWallet(w); // persist heuristic mutations (e.g. is_bot)
@@ -96,14 +129,13 @@ export async function backfillToken(repo: Repository, rpc: RpcClient, mint: stri
     }
   }
 
-  const summary = summarizeToken(
-    { token: repo.getToken(mint) as TokenRecord, events: allEvents, transactions, wallets },
-    findings,
-  );
+  const summary = summarizeToken({ token: current, events: allEvents, transactions, wallets }, findings);
   repo.updateTokenSummary(mint, summary.risk_score, summary.phase);
 
   return {
     mint,
+    signatures: sigs.length,
+    pages,
     txCount: transactions.length,
     eventCount: allEvents.length,
     findings: findings.length,
@@ -111,5 +143,7 @@ export async function backfillToken(repo: Repository, rpc: RpcClient, mint: stri
     investigationId: investigation.id,
     risk_score: summary.risk_score,
     phase: summary.phase,
+    deployer,
+    launchpad,
   };
 }

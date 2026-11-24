@@ -2,11 +2,10 @@ import { decodeTransaction } from "./decoder";
 import { PROGRAM_IDS } from "./decoder/programs";
 import type { NormalizedEvent, TransactionRecord } from "./types";
 
-const DEX_PROGRAMS = new Set<string>([
-  PROGRAM_IDS.RAYDIUM_AMM_V4,
-  PROGRAM_IDS.PUMP_FUN,
-  PROGRAM_IDS.JUPITER_V6,
-]);
+// Inner SPL transfers are skipped only when the parent instruction decoded as a
+// swap at the outer level (otherwise we'd double count). For undecoded parents
+// (Jupiter, unknown routers, launchpad create) we keep the inner Transfer events.
+const SKIP_INNER_PARENT_KINDS = new Set<string>(["PumpBuy", "PumpSell", "SwapBaseIn", "SwapBaseOut"]);
 
 // Converts a raw getTransaction(jsonParsed) result into normalized events.
 // SPL transfers that occur as inner instructions of a DEX/launchpad program
@@ -37,8 +36,8 @@ export function normalizeTransaction(tx: any): { events: NormalizedEvent[]; txRe
     switch (d.kind) {
       case "Transfer":
       case "TransferChecked":
-        // skip SPL transfers executed as CPI inside a DEX/launchpad instruction
-        if (d.source === "inner" && d.parent_program_id && DEX_PROGRAMS.has(d.parent_program_id)) break;
+        // skip SPL transfers executed as CPI inside a decoded swap instruction
+        if (d.source === "inner" && d.parent_kind && SKIP_INNER_PARENT_KINDS.has(d.parent_kind)) break;
         events.push(ev("Transfer", { from_wallet: d.from ?? null, to_wallet: d.to ?? null, amount: d.amount ?? "0", mint: d.mint ?? null }));
         break;
       case "MintTo":
@@ -82,6 +81,19 @@ export function normalizeTransaction(tx: any): { events: NormalizedEvent[]; txRe
       case "CreatePool":
         events.push(ev("CreatePool", { from_wallet: d.trader ?? null, to_wallet: d.pool ?? null, mint: d.mint ?? null, pool: d.pool ?? null }));
         break;
+      case "JupiterRoute": {
+        // Router-level swap: the actual token flows appear as inner SPL transfers
+        // (kept as Transfer events). Emit a Swap marker with the tx signer as trader.
+        const signer = firstSignerOf(tx);
+        events.push(ev("Swap", {
+          from_wallet: signer,
+          to_wallet: null,
+          amount: "0",
+          pool: null,
+          meta: { source: d.source, router: "jupiter_v6" },
+        }));
+        break;
+      }
       case "SetAuthority":
         events.push(ev("SetAuthority", { to_wallet: d.new_authority ?? null, mint: d.mint ?? null, meta: { authority_type: d.authority_type } }));
         break;
@@ -106,4 +118,10 @@ export function normalizeTransaction(tx: any): { events: NormalizedEvent[]; txRe
 
 function message_instructions(tx: any): number {
   return tx?.transaction?.message?.instructions?.length ?? 0;
+}
+
+function firstSignerOf(tx: any): string | null {
+  const keys = tx?.transaction?.message?.accountKeys ?? [];
+  const k0 = keys[0];
+  return (typeof k0 === "string" ? k0 : k0?.pubkey) ?? tx?.transaction?.signatures?.[0] ?? null;
 }

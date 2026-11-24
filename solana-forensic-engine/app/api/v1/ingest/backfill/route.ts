@@ -18,7 +18,11 @@ export async function POST(req: Request) {
   }
   try {
     const rpc = getRpcClient();
-    const result = await backfillToken(getRepo(), rpc, mint, Number(body?.limit) || 1000);
+    const result = await backfillToken(getRepo(), rpc, mint, {
+      limit: Number(body?.limit) || 200,
+      maxPages: Number(body?.maxPages) || 10,
+      launchWindow: Number(body?.launchWindow) || 200,
+    });
     return NextResponse.json(result);
   } catch (e) {
     return NextResponse.json(

@@ -1,6 +1,7 @@
 export interface DecodedInstruction {
   program_id: string;
   parent_program_id?: string;
+  parent_kind?: string;
   kind: string;
   source: "outer" | "inner";
   accounts: string[];
